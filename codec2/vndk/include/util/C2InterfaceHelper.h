@@ -21,7 +21,6 @@
 #include <util/C2InterfaceUtils.h>
 
 #include <map>
-#include <mutex>
 #include <vector>
 
 #include <stddef.h>
@@ -650,9 +649,6 @@ public:
     /**
      * Helper implementing config calls as well as other configuration updates.
      *
-     * This method is virtual, so implementations may provide wrappers around it (and perform
-     * actions just before and after a configuration).
-     *
      * \param params
      * \param mayBlock
      * \param failures
@@ -662,7 +658,7 @@ public:
      *                     null, settings with their values changed are added to this.
      * \return result from config
      */
-    virtual c2_status_t config(
+    c2_status_t config(
             const std::vector<C2Param*> &params, c2_blocking_t mayBlock,
             std::vector<std::unique_ptr<C2SettingResult>>* const failures,
             bool updateParams = true,
@@ -678,14 +674,6 @@ public:
         return mReflector;
     }
 
-    typedef std::unique_lock<std::mutex> Lock;
-
-    /**
-     * Locks the interface and returns a lock. This lock must be unlocked or released without
-     * calling any other blocking call.
-     */
-    Lock lock() const;
-
 private:
     void setInterfaceAddressBounds(uintptr_t start, uintptr_t end) {
         // TODO: exclude this helper
@@ -694,7 +682,6 @@ private:
     }
 
 protected:
-    mutable std::mutex mMutex;
     std::shared_ptr<C2ReflectorHelper> mReflector;
     struct FactoryImpl;
     std::shared_ptr<FactoryImpl> _mFactory;
@@ -714,7 +701,7 @@ protected:
      *
      * \param ix the index of the parameter
      */
-    size_t getDependencyIndex_l(C2Param::Index ix) const;
+    size_t getDependencyIndex(C2Param::Index ix) const;
 
     virtual ~C2InterfaceHelper() = default;
 

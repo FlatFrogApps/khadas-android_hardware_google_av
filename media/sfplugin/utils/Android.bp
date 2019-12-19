@@ -4,7 +4,6 @@ cc_library_shared {
 
     srcs: [
         "Codec2BufferUtils.cpp",
-        "Codec2Mapper.cpp",
     ],
 
     cflags: [
@@ -24,10 +23,6 @@ cc_library_shared {
         "libstagefright_codec2_vndk",
         "libstagefright_foundation",
         "libutils",
-    ],
-
-    static_libs: [
-        "libyuv_static",
     ],
 
     sanitize: {

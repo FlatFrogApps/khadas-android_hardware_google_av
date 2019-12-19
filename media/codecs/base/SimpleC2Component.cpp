@@ -19,7 +19,6 @@
 #include <log/log.h>
 
 #include <cutils/properties.h>
-#include <media/stagefright/foundation/AMessage.h>
 
 #include <inttypes.h>
 
@@ -58,132 +57,6 @@ void SimpleC2Component::WorkQueue::markDrain(uint32_t drainMode) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-SimpleC2Component::WorkHandler::WorkHandler() : mRunning(false) {}
-
-void SimpleC2Component::WorkHandler::setComponent(
-        const std::shared_ptr<SimpleC2Component> &thiz) {
-    mThiz = thiz;
-}
-
-static void Reply(const sp<AMessage> &msg, int32_t *err = nullptr) {
-    sp<AReplyToken> replyId;
-    CHECK(msg->senderAwaitsResponse(&replyId));
-    sp<AMessage> reply = new AMessage;
-    if (err) {
-        reply->setInt32("err", *err);
-    }
-    reply->postReply(replyId);
-}
-
-void SimpleC2Component::WorkHandler::onMessageReceived(const sp<AMessage> &msg) {
-    std::shared_ptr<SimpleC2Component> thiz = mThiz.lock();
-    if (!thiz) {
-        ALOGD("component not yet set; msg = %s", msg->debugString().c_str());
-        sp<AReplyToken> replyId;
-        if (msg->senderAwaitsResponse(&replyId)) {
-            sp<AMessage> reply = new AMessage;
-            reply->setInt32("err", C2_CORRUPTED);
-            reply->postReply(replyId);
-        }
-        return;
-    }
-
-    switch (msg->what()) {
-        case kWhatProcess: {
-            if (mRunning) {
-                if (thiz->processQueue()) {
-                    (new AMessage(kWhatProcess, this))->post();
-                }
-            } else {
-                ALOGV("Ignore process message as we're not running");
-            }
-            break;
-        }
-        case kWhatInit: {
-            int32_t err = thiz->onInit();
-            Reply(msg, &err);
-            // fall-through
-        }
-        case kWhatStart: {
-            mRunning = true;
-            break;
-        }
-        case kWhatStop: {
-            int32_t err = thiz->onStop();
-            Reply(msg, &err);
-            break;
-        }
-        case kWhatReset: {
-            thiz->onReset();
-            mRunning = false;
-            Reply(msg);
-            break;
-        }
-        case kWhatRelease: {
-            thiz->onRelease();
-            mRunning = false;
-            Reply(msg);
-            break;
-        }
-        default: {
-            ALOGD("Unrecognized msg: %d", msg->what());
-            break;
-        }
-    }
-}
-
-class SimpleC2Component::BlockingBlockPool : public C2BlockPool {
-public:
-    BlockingBlockPool(const std::shared_ptr<C2BlockPool>& base): mBase{base} {}
-
-    virtual local_id_t getLocalId() const override {
-        return mBase->getLocalId();
-    }
-
-    virtual C2Allocator::id_t getAllocatorId() const override {
-        return mBase->getAllocatorId();
-    }
-
-    virtual c2_status_t fetchLinearBlock(
-            uint32_t capacity,
-            C2MemoryUsage usage,
-            std::shared_ptr<C2LinearBlock>* block) {
-        c2_status_t status;
-        do {
-            status = mBase->fetchLinearBlock(capacity, usage, block);
-        } while (status == C2_TIMED_OUT);
-        return status;
-    }
-
-    virtual c2_status_t fetchCircularBlock(
-            uint32_t capacity,
-            C2MemoryUsage usage,
-            std::shared_ptr<C2CircularBlock>* block) {
-        c2_status_t status;
-        do {
-            status = mBase->fetchCircularBlock(capacity, usage, block);
-        } while (status == C2_TIMED_OUT);
-        return status;
-    }
-
-    virtual c2_status_t fetchGraphicBlock(
-            uint32_t width, uint32_t height, uint32_t format,
-            C2MemoryUsage usage,
-            std::shared_ptr<C2GraphicBlock>* block) {
-        c2_status_t status;
-        do {
-            status = mBase->fetchGraphicBlock(width, height, format, usage,
-                                              block);
-        } while (status == C2_TIMED_OUT);
-        return status;
-    }
-
-private:
-    std::shared_ptr<C2BlockPool> mBase;
-};
-
-////////////////////////////////////////////////////////////////////////////////
-
 namespace {
 
 struct DummyReadView : public C2ReadView {
@@ -195,23 +68,11 @@ struct DummyReadView : public C2ReadView {
 SimpleC2Component::SimpleC2Component(
         const std::shared_ptr<C2ComponentInterface> &intf)
     : mDummyReadView(DummyReadView()),
-      mIntf(intf),
-      mLooper(new ALooper),
-      mHandler(new WorkHandler) {
-    mLooper->setName(intf->getName().c_str());
-    (void)mLooper->registerHandler(mHandler);
-    mLooper->start(false, false, ANDROID_PRIORITY_VIDEO);
-}
-
-SimpleC2Component::~SimpleC2Component() {
-    mLooper->unregisterHandler(mHandler->id());
-    (void)mLooper->stop();
+      mIntf(intf) {
 }
 
 c2_status_t SimpleC2Component::setListener_vb(
         const std::shared_ptr<C2Component::Listener> &listener, c2_blocking_t mayBlock) {
-    mHandler->setComponent(shared_from_this());
-
     Mutexed<ExecState>::Locked state(mExecState);
     if (state->mState == RUNNING) {
         if (listener) {
@@ -233,17 +94,13 @@ c2_status_t SimpleC2Component::queue_nb(std::list<std::unique_ptr<C2Work>> * con
             return C2_BAD_STATE;
         }
     }
-    bool queueWasEmpty = false;
     {
         Mutexed<WorkQueue>::Locked queue(mWorkQueue);
-        queueWasEmpty = queue->empty();
         while (!items->empty()) {
             queue->push_back(std::move(items->front()));
             items->pop_front();
         }
-    }
-    if (queueWasEmpty) {
-        (new AMessage(WorkHandler::kWhatProcess, mHandler))->post();
+        queue->mCondition.broadcast();
     }
     return C2_OK;
 }
@@ -294,14 +151,10 @@ c2_status_t SimpleC2Component::drain_nb(drain_mode_t drainMode) {
             return C2_BAD_STATE;
         }
     }
-    bool queueWasEmpty = false;
     {
         Mutexed<WorkQueue>::Locked queue(mWorkQueue);
-        queueWasEmpty = queue->empty();
         queue->markDrain(drainMode);
-    }
-    if (queueWasEmpty) {
-        (new AMessage(WorkHandler::kWhatProcess, mHandler))->post();
+        queue->mCondition.broadcast();
     }
 
     return C2_OK;
@@ -313,21 +166,73 @@ c2_status_t SimpleC2Component::start() {
         return C2_BAD_STATE;
     }
     bool needsInit = (state->mState == UNINITIALIZED);
-    state.unlock();
     if (needsInit) {
-        sp<AMessage> reply;
-        (new AMessage(WorkHandler::kWhatInit, mHandler))->postAndAwaitResponse(&reply);
-        int32_t err;
-        CHECK(reply->findInt32("err", &err));
+        state.unlock();
+        c2_status_t err = onInit();
         if (err != C2_OK) {
-            return (c2_status_t)err;
+            return err;
         }
-    } else {
-        (new AMessage(WorkHandler::kWhatStart, mHandler))->post();
+        state.lock();
     }
-    state.lock();
+    if (!state->mThread.joinable()) {
+        mExitRequested = false;
+        {
+            Mutexed<ExitMonitor>::Locked monitor(mExitMonitor);
+            monitor->mExited = false;
+        }
+        state->mThread = std::thread(
+                [](std::weak_ptr<SimpleC2Component> wp) {
+                    while (true) {
+                        std::shared_ptr<SimpleC2Component> thiz = wp.lock();
+                        if (!thiz) {
+                            return;
+                        }
+                        if (thiz->exitRequested()) {
+                            ALOGV("stop processing");
+                            thiz->signalExit();
+                            return;
+                        }
+                        thiz->processQueue();
+                    }
+                },
+                shared_from_this());
+    }
     state->mState = RUNNING;
     return C2_OK;
+}
+
+void SimpleC2Component::signalExit() {
+    Mutexed<ExitMonitor>::Locked monitor(mExitMonitor);
+    monitor->mExited = true;
+    monitor->mCondition.broadcast();
+}
+
+void SimpleC2Component::requestExitAndWait(std::function<void()> job) {
+    {
+        Mutexed<ExecState>::Locked state(mExecState);
+        if (!state->mThread.joinable()) {
+            return;
+        }
+    }
+    mExitRequested = true;
+    {
+        Mutexed<WorkQueue>::Locked queue(mWorkQueue);
+        queue->mCondition.broadcast();
+    }
+    // TODO: timeout?
+    {
+        Mutexed<ExitMonitor>::Locked monitor(mExitMonitor);
+        while (!monitor->mExited) {
+            monitor.waitForCondition(monitor->mCondition);
+        }
+        job();
+    }
+    Mutexed<ExecState>::Locked state(mExecState);
+    if (state->mThread.joinable()) {
+        ALOGV("joining the processing thread");
+        state->mThread.join();
+        ALOGV("joined the processing thread");
+    }
 }
 
 c2_status_t SimpleC2Component::stop() {
@@ -347,12 +252,10 @@ c2_status_t SimpleC2Component::stop() {
         Mutexed<PendingWork>::Locked pending(mPendingWork);
         pending->clear();
     }
-    sp<AMessage> reply;
-    (new AMessage(WorkHandler::kWhatStop, mHandler))->postAndAwaitResponse(&reply);
-    int32_t err;
-    CHECK(reply->findInt32("err", &err));
+    c2_status_t err;
+    requestExitAndWait([this, &err]{ err = onStop(); });
     if (err != C2_OK) {
-        return (c2_status_t)err;
+        return err;
     }
     return C2_OK;
 }
@@ -371,15 +274,13 @@ c2_status_t SimpleC2Component::reset() {
         Mutexed<PendingWork>::Locked pending(mPendingWork);
         pending->clear();
     }
-    sp<AMessage> reply;
-    (new AMessage(WorkHandler::kWhatReset, mHandler))->postAndAwaitResponse(&reply);
+    requestExitAndWait([this]{ onReset(); });
     return C2_OK;
 }
 
 c2_status_t SimpleC2Component::release() {
     ALOGV("release");
-    sp<AMessage> reply;
-    (new AMessage(WorkHandler::kWhatRelease, mHandler))->postAndAwaitResponse(&reply);
+    requestExitAndWait([this]{ onRelease(); });
     return C2_OK;
 }
 
@@ -411,55 +312,40 @@ void SimpleC2Component::finish(
     }
     if (work) {
         fillWork(work);
-        std::shared_ptr<C2Component::Listener> listener = mExecState.lock()->mListener;
+        Mutexed<ExecState>::Locked state(mExecState);
+        std::shared_ptr<C2Component::Listener> listener = state->mListener;
+        state.unlock();
         listener->onWorkDone_nb(shared_from_this(), vec(work));
         ALOGV("returning pending work");
     }
 }
 
-void SimpleC2Component::cloneAndSend(
-        uint64_t frameIndex,
-        const std::unique_ptr<C2Work> &currentWork,
-        std::function<void(const std::unique_ptr<C2Work> &)> fillWork) {
-    std::unique_ptr<C2Work> work(new C2Work);
-    if (currentWork->input.ordinal.frameIndex == frameIndex) {
-        work->input.flags = currentWork->input.flags;
-        work->input.ordinal = currentWork->input.ordinal;
-    } else {
-        Mutexed<PendingWork>::Locked pending(mPendingWork);
-        if (pending->count(frameIndex) == 0) {
-            ALOGW("unknown frame index: %" PRIu64, frameIndex);
-            return;
-        }
-        work->input.flags = pending->at(frameIndex)->input.flags;
-        work->input.ordinal = pending->at(frameIndex)->input.ordinal;
-    }
-    work->worklets.emplace_back(new C2Worklet);
-    if (work) {
-        fillWork(work);
-        std::shared_ptr<C2Component::Listener> listener = mExecState.lock()->mListener;
-        listener->onWorkDone_nb(shared_from_this(), vec(work));
-        ALOGV("cloned and sending work");
-    }
-}
-
-bool SimpleC2Component::processQueue() {
+void SimpleC2Component::processQueue() {
     std::unique_ptr<C2Work> work;
     uint64_t generation;
     int32_t drainMode;
     bool isFlushPending = false;
-    bool hasQueuedWork = false;
     {
         Mutexed<WorkQueue>::Locked queue(mWorkQueue);
-        if (queue->empty()) {
-            return false;
+        nsecs_t deadline = systemTime() + ms2ns(250);
+        while (queue->empty()) {
+            if (exitRequested()) {
+                return;
+            }
+            nsecs_t now = systemTime();
+            if (now >= deadline) {
+                return;
+            }
+            status_t err = queue.waitForConditionRelative(queue->mCondition, deadline - now);
+            if (err == TIMED_OUT) {
+                return;
+            }
         }
 
         generation = queue->generation();
         drainMode = queue->drainMode();
         isFlushPending = queue->popPendingFlush();
         work = queue->pop_front();
-        hasQueuedWork = !queue->empty();
     }
     if (isFlushPending) {
         ALOGV("processing pending flush");
@@ -496,16 +382,12 @@ bool SimpleC2Component::processQueue() {
                 }
             }
 
-            std::shared_ptr<C2BlockPool> blockPool;
-            err = GetCodec2BlockPool(poolId, shared_from_this(), &blockPool);
+            err = GetCodec2BlockPool(poolId, shared_from_this(), &mOutputBlockPool);
             ALOGD("Using output block pool with poolID %llu => got %llu - %d",
                     (unsigned long long)poolId,
                     (unsigned long long)(
-                            blockPool ? blockPool->getLocalId() : 111000111),
+                            mOutputBlockPool ? mOutputBlockPool->getLocalId() : 111000111),
                     err);
-            if (err == C2_OK) {
-                mOutputBlockPool = std::make_shared<BlockingBlockPool>(blockPool);
-            }
             return err;
         }();
         if (err != C2_OK) {
@@ -513,7 +395,7 @@ bool SimpleC2Component::processQueue() {
             std::shared_ptr<C2Component::Listener> listener = state->mListener;
             state.unlock();
             listener->onError_nb(shared_from_this(), err);
-            return hasQueuedWork;
+            return;
         }
     }
 
@@ -525,24 +407,9 @@ bool SimpleC2Component::processQueue() {
             state.unlock();
             listener->onError_nb(shared_from_this(), err);
         }
-        return hasQueuedWork;
+        return;
     }
 
-    {
-        std::vector<C2Param *> updates;
-        for (const std::unique_ptr<C2Param> &param: work->input.configUpdate) {
-            if (param) {
-                updates.emplace_back(param.get());
-            }
-        }
-        if (!updates.empty()) {
-            std::vector<std::unique_ptr<C2SettingResult>> failures;
-            c2_status_t err = intf()->config_vb(updates, C2_MAY_BLOCK, &failures);
-            ALOGD("applied %zu configUpdates => %s (%d)", updates.size(), asString(err), err);
-        }
-    }
-
-    ALOGV("start processing frame #%" PRIu64, work->input.ordinal.frameIndex.peeku());
     process(work, mOutputBlockPool);
     ALOGV("processed frame #%" PRIu64, work->input.ordinal.frameIndex.peeku());
     {
@@ -559,7 +426,7 @@ bool SimpleC2Component::processQueue() {
                 listener->onWorkDone_nb(shared_from_this(), vec(work));
             }
             queue.lock();
-            return hasQueuedWork;
+            return;
         }
     }
     if (work->workletsProcessed != 0u) {
@@ -570,7 +437,6 @@ bool SimpleC2Component::processQueue() {
         listener->onWorkDone_nb(shared_from_this(), vec(work));
     } else {
         ALOGV("queue pending work");
-        work->input.buffers.clear();
         std::unique_ptr<C2Work> unexpected;
         {
             Mutexed<PendingWork>::Locked pending(mPendingWork);
@@ -590,7 +456,6 @@ bool SimpleC2Component::processQueue() {
             listener->onWorkDone_nb(shared_from_this(), vec(unexpected));
         }
     }
-    return hasQueuedWork;
 }
 
 std::shared_ptr<C2Buffer> SimpleC2Component::createLinearBuffer(

@@ -607,6 +607,9 @@ Status _addBaseBlock(
     auto it = baseBlockIndices->find(bpData.get());
     if (it != baseBlockIndices->end()) {
         *index = it->second;
+    } else if (!bufferPoolSender) {
+        ALOGE("No access to the receiver's BufferPool.");
+        return Status::BAD_VALUE;
     } else {
         *index = baseBlocks->size();
         baseBlockIndices->emplace(bpData.get(), *index);
@@ -614,18 +617,16 @@ Status _addBaseBlock(
 
         BaseBlock &dBaseBlock = baseBlocks->back();
         dBaseBlock.type = BaseBlock::Type::POOLED;
+        ResultStatus bpStatus = bufferPoolSender->send(
+                bpData,
+                &dBaseBlock.pooledBlock);
 
-        if (bufferPoolSender) {
-            ResultStatus bpStatus = bufferPoolSender->send(
-                    bpData,
-                    &dBaseBlock.pooledBlock);
-
-            if (bpStatus != ResultStatus::OK) {
-                ALOGE("Failed to send buffer with BufferPool. Error: %d.",
-                        static_cast<int>(bpStatus));
-                return Status::BAD_VALUE;
-            }
+        if (bpStatus != ResultStatus::OK) {
+            ALOGE("Failed to send buffer with BufferPool. Error: %d.",
+                    static_cast<int>(bpStatus));
+            return Status::BAD_VALUE;
         }
+
     }
     return Status::OK;
 }
@@ -863,22 +864,15 @@ Status objcpy(FrameData* d, const C2FrameData& s,
 // DefaultBufferPoolSender's implementation
 
 DefaultBufferPoolSender::DefaultBufferPoolSender(
-        const sp<IClientManager>& receiverManager,
-        std::chrono::steady_clock::duration refreshInterval)
-    : mReceiverManager(receiverManager),
-      mSourceConnectionId(0),
-      mLastSent(std::chrono::steady_clock::now()),
-      mRefreshInterval(refreshInterval) {
+        const sp<IClientManager>& receiverManager) :
+    mReceiverManager(receiverManager), mSourceConnectionId(0) {
 }
 
-void DefaultBufferPoolSender::setReceiver(
-        const sp<IClientManager>& receiverManager,
-        std::chrono::steady_clock::duration refreshInterval) {
+void DefaultBufferPoolSender::setReceiver(const sp<IClientManager>& receiverManager) {
     std::lock_guard<std::mutex> lock(mMutex);
     if (mReceiverManager != receiverManager) {
         mReceiverManager = receiverManager;
     }
-    mRefreshInterval = refreshInterval;
 }
 
 ResultStatus DefaultBufferPoolSender::send(
@@ -898,28 +892,19 @@ ResultStatus DefaultBufferPoolSender::send(
         }
     }
     int64_t connectionId = bpData->mConnectionId;
-    std::chrono::steady_clock::time_point now =
-            std::chrono::steady_clock::now();
-    std::chrono::steady_clock::duration interval = now - mLastSent;
-    if (mSourceConnectionId == 0 ||
-            mSourceConnectionId != connectionId ||
-            interval > mRefreshInterval) {
+    if (mSourceConnectionId == 0 || mSourceConnectionId != connectionId) {
         // Initialize the bufferpool connection.
         mSourceConnectionId = connectionId;
         if (mSourceConnectionId == 0) {
             return ResultStatus::CRITICAL_ERROR;
         }
-
         int64_t receiverConnectionId;
-        rs = mSenderManager->registerSender(mReceiverManager,
-                                            connectionId,
-                                            &receiverConnectionId);
+        rs = mSenderManager->registerSender(mReceiverManager, connectionId, &receiverConnectionId);
         if ((rs != ResultStatus::OK) && (rs != ResultStatus::ALREADY_EXISTS)) {
             ALOGW("registerSender -- returned error: %d.",
                     static_cast<int>(rs));
             return rs;
         } else {
-            ALOGV("registerSender -- succeeded.");
             mReceiverConnectionId = receiverConnectionId;
         }
     }
@@ -941,7 +926,6 @@ ResultStatus DefaultBufferPoolSender::send(
     bpMessage->bufferId = bpData->mId;
     bpMessage->transactionId = transactionId;
     bpMessage->timestampUs = timestampUs;
-    mLastSent = now;
     return rs;
 }
 
@@ -1604,12 +1588,11 @@ sp<GraphicBuffer> createGraphicBuffer(const C2ConstGraphicBlock& block) {
     uint32_t format;
     uint64_t usage;
     uint32_t stride;
-    uint32_t generation;
     uint64_t bqId;
     int32_t bqSlot;
     _UnwrapNativeCodec2GrallocMetadata(
             block.handle(), &width, &height, &format, &usage,
-            &stride, &generation, &bqId, reinterpret_cast<uint32_t*>(&bqSlot));
+            &stride, &bqId, reinterpret_cast<uint32_t*>(&bqSlot));
     native_handle_t *grallocHandle =
             UnwrapNativeCodec2GrallocHandle(block.handle());
     sp<GraphicBuffer> graphicBuffer =
@@ -1701,12 +1684,11 @@ status_t attachToBufferQueue(const C2ConstGraphicBlock& block,
 }
 
 bool getBufferQueueAssignment(const C2ConstGraphicBlock& block,
-                              uint32_t* generation,
                               uint64_t* bqId,
                               int32_t* bqSlot) {
     return _C2BlockFactory::GetBufferQueueData(
             _C2BlockFactory::GetGraphicBlockPoolData(block),
-            generation, bqId, bqSlot);
+            bqId, bqSlot);
 }
 
 bool yieldBufferQueueBlock(const C2ConstGraphicBlock& block) {
@@ -1735,18 +1717,16 @@ bool holdBufferQueueBlock(const C2ConstGraphicBlock& block,
         return false;
     }
 
-    uint32_t oldGeneration;
     uint64_t oldId;
     int32_t oldSlot;
     // If the block is not bufferqueue-based, do nothing.
-    if (!_C2BlockFactory::GetBufferQueueData(
-            data, &oldGeneration, &oldId, &oldSlot) ||
+    if (!_C2BlockFactory::GetBufferQueueData(data, &oldId, &oldSlot) ||
             (oldId == 0)) {
         return false;
     }
 
     // If the block's bqId is the same as the desired bqId, just hold.
-    if ((oldId == bqId) && (oldGeneration == generation)) {
+    if (oldId == bqId) {
         ALOGV("holdBufferQueueBlock -- import without attaching: "
                 "bqId %llu, bqSlot %d, generation %u.",
                 static_cast<long long unsigned>(oldId),

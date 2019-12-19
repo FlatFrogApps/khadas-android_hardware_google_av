@@ -733,9 +733,10 @@ public:
         return C2_OMITTED;
     }
 
-    virtual ~C2Allocator() = default;
 protected:
     C2Allocator() = default;
+
+    virtual ~C2Allocator() = default;
 };
 
 /**

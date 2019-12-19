@@ -82,11 +82,6 @@ class C2SoftOpusDec::IntfImpl : public C2InterfaceHelper {
                 .withFields({C2F(mBitrate, value).inRange(6000, 510000)})
                 .withSetter(Setter<decltype(*mBitrate)>::NonStrictValueWithNoDeps)
                 .build());
-
-        addParameter(
-                DefineParam(mInputMaxBufSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
-                .withConstValue(new C2StreamMaxBufferSizeInfo::input(0u, 960 * 6))
-                .build());
     }
 
    private:
@@ -97,7 +92,6 @@ class C2SoftOpusDec::IntfImpl : public C2InterfaceHelper {
     std::shared_ptr<C2StreamSampleRateInfo::output> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::output> mChannelCount;
     std::shared_ptr<C2BitrateTuning::input> mBitrate;
-    std::shared_ptr<C2StreamMaxBufferSizeInfo::input> mInputMaxBufSize;
 };
 
 C2SoftOpusDec::C2SoftOpusDec(const char *name, c2_node_id_t id,

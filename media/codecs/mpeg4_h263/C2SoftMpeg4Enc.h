@@ -60,12 +60,8 @@ private:
     bool     mSignalledError;
 
     uint32_t mOutBufferSize;
-    // configurations used by component in process
-    // (TODO: keep this in intf but make them internal only)
-    std::shared_ptr<C2StreamPictureSizeInfo::input> mSize;
-    std::shared_ptr<C2StreamFrameRateInfo::output> mFrameRate;
-    std::shared_ptr<C2StreamBitrateInfo::output> mBitrate;
-
+    // 1: all I-frames, <0: infinite
+    int32_t  mKeyFrameInterval;
     int64_t  mNumInputFrames;
     MP4EncodingMode mEncodeMode;
 

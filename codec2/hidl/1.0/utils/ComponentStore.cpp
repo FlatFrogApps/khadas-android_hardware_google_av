@@ -28,7 +28,6 @@
 #include <media/stagefright/bqhelper/GraphicBufferSource.h>
 
 #include <C2PlatformSupport.h>
-#include <util/C2InterfaceHelper.h>
 
 #include <utils/Errors.h>
 
@@ -227,12 +226,11 @@ Return<sp<IInputSurface>> ComponentStore::createInputSurface() {
         return nullptr;
     }
     typedef ::android::hardware::graphics::bufferqueue::V1_0::
-            IGraphicBufferProducer HGbp;
-    typedef ::android::TWGraphicBufferProducer<HGbp> B2HGbp;
+            IGraphicBufferProducer HGBP;
+    typedef ::android::TWGraphicBufferProducer<HGBP> B2HGBP;
     return new InputSurface(
             this,
-            std::make_shared<C2ReflectorHelper>(),
-            new B2HGbp(source->getIGraphicBufferProducer()),
+            new B2HGBP(source->getIGraphicBufferProducer()),
             source);
 }
 
@@ -356,16 +354,16 @@ std::ostream& dump(
 Return<void> ComponentStore::debug(
         const hidl_handle& handle,
         const hidl_vec<hidl_string>& /* args */) {
-    LOG(INFO) << "debug -- dumping...";
-    const native_handle_t *h = handle.getNativeHandle();
-    if (!h || h->numFds != 1) {
-       LOG(ERROR) << "debug -- dumping failed -- "
-               "invalid file descriptor to dump to";
-       return Void();
-    }
-    std::ostringstream out;
+   LOG(INFO) << "debug -- dumping...";
+   const native_handle_t *h = handle.getNativeHandle();
+   if (!h || h->numFds != 1) {
+      LOG(ERROR) << "debug -- dumping failed -- "
+              "invalid file descriptor to dump to";
+      return Void();
+   }
+   std::ostringstream out;
 
-    { // Populate "out".
+   { // Populate "out".
 
         constexpr const char indent[] = "  ";
 
@@ -417,14 +415,14 @@ Return<void> ComponentStore::debug(
 
         out << "End of dump -- C2ComponentStore: "
                 << mStore->getName() << std::endl;
-    }
+   }
 
-    if (!android::base::WriteStringToFd(out.str(), h->data[0])) {
-        PLOG(WARNING) << "debug -- dumping failed -- write()";
-    } else {
-        LOG(INFO) << "debug -- dumping succeeded";
-    }
-    return Void();
+   if (!android::base::WriteStringToFd(out.str(), h->data[0])) {
+       PLOG(WARNING) << "debug -- dumping failed -- write()";
+   } else {
+       LOG(INFO) << "debug -- dumping succeeded";
+   }
+   return Void();
 }
 
 

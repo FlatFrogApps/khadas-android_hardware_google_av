@@ -83,10 +83,6 @@ struct Connection : public IConnection {
      */
     void initialize(const sp<Accessor> &accessor, ConnectionId connectionId);
 
-    enum : uint32_t {
-        SYNC_BUFFERID = UINT32_MAX,
-    };
-
 private:
     bool mInitialized;
     sp<Accessor> mAccessor;

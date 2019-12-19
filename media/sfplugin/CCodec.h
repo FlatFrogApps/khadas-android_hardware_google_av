@@ -66,9 +66,7 @@ public:
     virtual void signalRequestIDRFrame() override;
 
     void initiateReleaseIfStuck();
-    void onWorkDone(std::list<std::unique_ptr<C2Work>> &workItems,
-                    size_t numDiscardedInputBuffers);
-    void onInputBufferDone(const std::shared_ptr<C2Buffer>& buffer);
+    void onWorkDone(std::list<std::unique_ptr<C2Work>> &workItems);
 
 protected:
     virtual ~CCodec();
@@ -95,13 +93,7 @@ private:
     status_t setupInputSurface(const std::shared_ptr<InputSurfaceWrapper> &surface);
     void setParameters(const sp<AMessage> &params);
 
-    void setDeadline(
-            const TimePoint &now,
-            const std::chrono::milliseconds &timeout,
-            const char *name);
-
-    void onWorkQueued(bool eos);
-    void subQueuedWorkCount(uint32_t count);
+    void setDeadline(const TimePoint &deadline, const char *name);
 
     enum {
         kWhatAllocate,
@@ -115,7 +107,6 @@ private:
         kWhatSetParameters,
 
         kWhatWorkDone,
-        kWhatWatch,
     };
 
     enum {
@@ -167,13 +158,9 @@ private:
     struct ClientListener;
 
     Mutexed<NamedTimePoint> mDeadline;
-    std::atomic_int32_t mQueuedWorkCount;
-    Mutexed<NamedTimePoint> mQueueDeadline;
-    Mutexed<NamedTimePoint> mEosDeadline;
     typedef CCodecConfig Config;
     Mutexed<Config> mConfig;
     Mutexed<std::list<std::unique_ptr<C2Work>>> mWorkDoneQueue;
-    Mutexed<std::list<size_t>> mNumDiscardedInputBuffersQueue;
 
     friend class CCodecCallbackImpl;
 
